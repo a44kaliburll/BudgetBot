@@ -234,6 +234,174 @@
       };
     },
 
+    // ================= OFX / QFX PARSING =================
+    // Handles OFX 1.x (SGML, unclosed leaf tags) and 2.x (XML).
+    // Returns [{date, amount, payee, memo, fitId, trnType}] — amount signed
+    // (negative = money out), per the OFX convention.
+    parseOFX(text) {
+      const out = [];
+      const blocks = text.match(/<STMTTRN>[\s\S]*?<\/STMTTRN>/gi) || [];
+      const field = (block, tag) => {
+        const m = block.match(new RegExp('<' + tag + '>([^<\\r\\n]*)', 'i'));
+        return m ? m[1].trim() : '';
+      };
+      for (const block of blocks) {
+        const rawDate = field(block, 'DTPOSTED');
+        const rawAmt = field(block, 'TRNAMT').replace(/,/g, '.');
+        const amount = parseFloat(rawAmt);
+        if (!/^\d{8}/.test(rawDate) || isNaN(amount) || amount === 0) continue;
+        const date = `${rawDate.slice(0, 4)}-${rawDate.slice(4, 6)}-${rawDate.slice(6, 8)}`;
+        const name = field(block, 'NAME');
+        const memo = field(block, 'MEMO');
+        out.push({
+          date,
+          amount,
+          payee: name || memo || '(no description)',
+          memo: memo && memo !== name ? memo : '',
+          fitId: field(block, 'FITID') || null,
+          trnType: field(block, 'TRNTYPE').toUpperCase()
+        });
+      }
+      return out;
+    },
+
+    isOFX(text) {
+      return /OFXHEADER|<OFX>|<\?OFX/i.test(text.slice(0, 2000));
+    },
+
+    // ================= AUTO-CATEGORIZATION =================
+    // Learn payee -> category from history: Map(normPayee -> Map(categoryId -> count))
+    buildPayeeMap(transactions) {
+      const map = new Map();
+      for (const t of transactions) {
+        if (!t.categoryId || !t.payee || t.type === 'transfer') continue;
+        const key = U.normPayee(t.payee);
+        if (key.length < 3) continue;
+        if (!map.has(key)) map.set(key, new Map());
+        const counts = map.get(key);
+        counts.set(t.categoryId, (counts.get(t.categoryId) || 0) + 1);
+      }
+      return map;
+    },
+
+    // ================= SUBSCRIPTION DETECTION =================
+    KNOWN_SUBS: [
+      'netflix', 'spotify', 'hulu', 'disney', 'youtube', 'icloud', 'apple', 'audible',
+      'amazon prime', 'prime video', 'adobe', 'microsoft', 'office', 'xbox', 'playstation',
+      'nintendo', 'dropbox', 'onedrive', 'paramount', 'peacock', 'hbo', 'crunchyroll',
+      'patreon', 'substack', 'nyt', 'new york times', 'wall street journal', 'gym', 'fitness',
+      'peloton', 'chatgpt', 'openai', 'claude', 'anthropic', 'norton', 'mcafee', 'nordvpn',
+      'expressvpn', 'ring', 'adt', 'sirius', 'pandora', 'tidal', 'kindle', 'chewy',
+      'dollar shave', 'hellofresh', 'blue apron', 'insurance', 'geico', 'state farm',
+      'progressive', 'allstate', 'verizon', 't mobile', 'at&t', 'comcast', 'xfinity',
+      'spectrum', 'internet', 'storage', 'membership'
+    ],
+
+    SUB_CADENCES: [
+      { id: 'weekly',     days: 7,     tol: 2,  freq: 'weekly',     perYear: 52 },
+      { id: 'biweekly',   days: 14,    tol: 3,  freq: 'biweekly',   perYear: 26 },
+      { id: 'monthly',    days: 30.4,  tol: 5,  freq: 'monthly',    perYear: 12 },
+      { id: 'quarterly',  days: 91,    tol: 10, freq: 'quarterly',  perYear: 4 },
+      { id: 'semiannual', days: 182,   tol: 15, freq: 'semiannual', perYear: 2 },
+      { id: 'annual',     days: 365,   tol: 21, freq: 'annual',     perYear: 1 }
+    ],
+
+    // Find recurring charges in expense history. Pure function of transactions.
+    detectSubscriptions(transactions) {
+      const groups = new Map();
+      for (const t of transactions) {
+        if (t.type !== 'expense' || !t.payee) continue;
+        const key = U.normPayee(t.payee);
+        if (key.length < 3) continue;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(t);
+      }
+
+      const today = U.todayStr();
+      const results = [];
+
+      for (const [key, charges] of groups) {
+        if (charges.length < 2) continue;
+        charges.sort((a, b) => a.date < b.date ? -1 : 1);
+
+        const intervals = [];
+        for (let i = 1; i < charges.length; i++) {
+          intervals.push(U.daysBetween(charges[i - 1].date, charges[i].date));
+        }
+
+        const known = this.KNOWN_SUBS.some(k => key.includes(k));
+
+        // best-matching cadence by share of intervals within tolerance
+        let best = null;
+        for (const cad of this.SUB_CADENCES) {
+          const hits = intervals.filter(d => Math.abs(d - cad.days) <= cad.tol).length;
+          const score = hits / intervals.length;
+          if (!best || score > best.score) best = { cad, score };
+        }
+        if (!best || best.score < (known ? 0.5 : 0.65)) continue;
+        // two data points = one interval; only trust it for common cadences or known merchants
+        if (charges.length === 2 && !known && !['monthly', 'annual'].includes(best.cad.id)) continue;
+
+        // amount stability across consecutive charges (tolerates gradual price changes)
+        let stablePairs = 0;
+        for (let i = 1; i < charges.length; i++) {
+          const prev = charges[i - 1].amount, cur = charges[i].amount;
+          if (Math.abs(cur - prev) <= Math.max(1.5, 0.2 * prev)) stablePairs++;
+        }
+        const amtScore = stablePairs / (charges.length - 1);
+        if (amtScore < (known ? 0.34 : 0.55)) continue;
+
+        const amounts = charges.map(c => c.amount);
+        const latest = amounts[amounts.length - 1];
+        const prevMedian = amounts.length > 2 ? U.median(amounts.slice(0, -1)) : amounts[0];
+        const priceChange = Math.abs(latest - prevMedian) > Math.max(0.5, 0.03 * prevMedian)
+          ? { from: U.round2(prevMedian), to: U.round2(latest) }
+          : null;
+
+        // most frequent category & account across the group's charges
+        const modeOf = (vals) => {
+          const c = new Map();
+          let bestV = null, bestN = 0;
+          for (const v of vals) {
+            if (!v) continue;
+            const n = (c.get(v) || 0) + 1;
+            c.set(v, n);
+            if (n > bestN) { bestN = n; bestV = v; }
+          }
+          return bestV;
+        };
+
+        const lastDate = charges[charges.length - 1].date;
+        const nextExpected = U.addDays(lastDate, Math.round(best.cad.days));
+        const overdueDays = U.daysBetween(nextExpected, today);
+        const inactive = overdueDays > best.cad.days * 0.75;
+
+        const confidence = best.score * 0.6 + amtScore * 0.4 + (known ? 0.1 : 0);
+
+        results.push({
+          key,
+          displayName: modeOf(charges.map(c => c.payee)) || key,
+          categoryId: modeOf(charges.map(c => c.categoryId)),
+          accountId: modeOf(charges.map(c => c.accountId)),
+          cadence: best.cad.id,
+          frequency: best.cad.freq,
+          perYear: best.cad.perYear,
+          amount: latest,
+          monthlyCost: latest * best.cad.perYear / 12,
+          chargeCount: charges.length,
+          firstDate: charges[0].date,
+          lastDate,
+          nextExpected,
+          inactive,
+          priceChange,
+          known,
+          confidence: Math.min(1, confidence)
+        });
+      }
+
+      return results.sort((a, b) => b.monthlyCost - a.monthlyCost);
+    },
+
     // Highest sustainable annual spending (today's $) at the target success rate
     safeSpending(r, startBalance, target = 0.9) {
       let lo = 0, hi = Math.max(r.retireSpending * 3, 40000);

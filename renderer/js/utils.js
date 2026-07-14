@@ -159,6 +159,26 @@
       });
     },
 
+    median(arr) {
+      if (!arr.length) return 0;
+      const s = [...arr].sort((a, b) => a - b);
+      const m = Math.floor(s.length / 2);
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    },
+
+    // Normalize a bank payee string to a stable matching key:
+    // "NETFLIX.COM 866-579-7172 CA" -> "netflix"
+    normPayee(s) {
+      let x = String(s || '').toLowerCase();
+      x = x.replace(/[0-9#*]+/g, ' ');
+      x = x.replace(/\.(com|net|org|co|io|tv)\b/g, ' ');
+      x = x.replace(/\b(pos|debit|credit|purchase|payment|pmt|ach|web|online|recurring|autopay|chk|card|visa|mastercard|amex|paypal|sq|tst|llc|inc|corp|www)\b/g, ' ');
+      x = x.replace(/[^a-z&' ]+/g, ' ');
+      x = x.replace(/\s+/g, ' ').trim();
+      const words = x.split(' ').filter(w => w.length > 1 || w === '&');
+      return words.slice(0, 4).join(' ');
+    },
+
     percentile(sortedArr, p) {
       if (!sortedArr.length) return 0;
       const idx = (sortedArr.length - 1) * p;

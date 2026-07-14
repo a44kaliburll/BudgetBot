@@ -95,6 +95,8 @@
       budgets: {},
       recurring: [],
       goals: [],
+      rules: [],                 // [{id, pattern (normalized substring), categoryId}]
+      subscriptionIgnores: [],   // normalized payee keys hidden from the finder
       netWorthHistory: [],
       retirement: defaultRetirement()
     };
@@ -409,6 +411,50 @@
 
     monthlyEquivalent(r) {
       return r.amount * (FREQUENCIES[r.frequency]?.perYear || 12) / 12;
+    },
+
+    // ---------------- categorization rules ----------------
+    // Explicit rules beat learned history; longer (more specific) patterns beat shorter.
+    upsertRule(pattern, categoryId) {
+      pattern = U.normPayee(pattern);
+      if (pattern.length < 3 || !this.category(categoryId)) return null;
+      let rule = this.state.rules.find(r => r.pattern === pattern);
+      if (rule) rule.categoryId = categoryId;
+      else {
+        rule = { id: U.uid(), pattern, categoryId, createdAt: U.todayStr() };
+        this.state.rules.push(rule);
+      }
+      this.emit();
+      return rule;
+    },
+
+    deleteRule(id) {
+      this.state.rules = this.state.rules.filter(r => r.id !== id);
+      this.emit();
+    },
+
+    // Suggest a category for a payee: explicit rules, then learned history.
+    // `group` is 'expense' | 'income'; pass a prebuilt payeeMap when suggesting in bulk.
+    suggestCategory(payee, group, payeeMap) {
+      const key = U.normPayee(payee);
+      if (!key) return null;
+      const rules = U.sortBy(this.state.rules, r => -r.pattern.length);
+      for (const r of rules) {
+        if (!key.includes(r.pattern)) continue;
+        const cat = this.category(r.categoryId);
+        if (cat && cat.group === group) return { categoryId: r.categoryId, source: 'rule', ruleId: r.id };
+      }
+      const map = payeeMap || Engines.buildPayeeMap(this.state.transactions);
+      const counts = map.get(key);
+      if (counts) {
+        let bestId = null, bestN = 0;
+        for (const [catId, n] of counts) {
+          const cat = this.category(catId);
+          if (cat && cat.group === group && n > bestN) { bestN = n; bestId = catId; }
+        }
+        if (bestId) return { categoryId: bestId, source: 'learned' };
+      }
+      return null;
     },
 
     // ---------------- goals ----------------

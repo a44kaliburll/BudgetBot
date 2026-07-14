@@ -9,7 +9,10 @@ your computer — no accounts, no cloud, no telemetry.
 
 **Everyday money**
 - **Accounts** — checking, savings, brokerage, 401(k)/Roth/IRA/HSA/529, property, credit cards, loans and mortgages, grouped with live net worth
-- **Transactions** — fast entry (`Ctrl+N` anywhere), search and filters, transfers that correctly move money between accounts, CSV import (with column mapping) and export
+- **Transactions** — fast entry (`Ctrl+N` anywhere), search and filters, transfers that correctly move money between accounts, CSV export
+- **Bank file import** — OFX / QFX (what most US banks export) and CSV with column mapping; review screen with automatic duplicate detection (via OFX transaction IDs) before anything is saved
+- **Auto-categorization** — suggests categories from your own history, plus explicit payee rules; correcting a category during import teaches NestEgg a new rule automatically
+- **Subscription finder** — detects recurring charges in your history (regular timing + stable amounts), totals your monthly/yearly subscription cost, flags price increases, spots subscriptions that stopped, and converts any of them into tracked Recurring items
 - **Budget** — monthly plans per category, progress with over-budget warnings, copy last month, auto-fill from your 3-month spending history, custom categories
 - **Recurring** — bills, subscriptions, paychecks and auto-savings; due reminders on the dashboard, optional auto-posting
 - **Goals** — target amounts and dates, linked to a real account or tracked manually, required monthly pace

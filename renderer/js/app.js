@@ -10,6 +10,7 @@
     { id: 'transactions', label: 'Transactions', icon: 'list' },
     { id: 'budget', label: 'Budget', icon: 'budget' },
     { id: 'recurring', label: 'Recurring', icon: 'repeat' },
+    { id: 'subscriptions', label: 'Subscriptions', icon: 'search' },
     { id: 'goals', label: 'Goals', icon: 'target' },
     { section: 'Planning' },
     { id: 'debt', label: 'Debt payoff', icon: 'card' },

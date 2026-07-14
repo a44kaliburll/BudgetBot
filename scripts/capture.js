@@ -39,6 +39,24 @@ app.whenReady().then(async () => {
   await sleep(900);
   await shot('01-dashboard-dark.png');
 
+  await win.webContents.executeJavaScript(`App.go('subscriptions'); true`);
+  await sleep(700);
+  await shot('07-subscriptions-dark.png');
+
+  await win.webContents.executeJavaScript(`
+    App.go('transactions');
+    setTimeout(() => Views.transactions.openImportPreview([
+      { date: '2026-07-03', amount: -15.49, payee: 'NETFLIX.COM 866-579-7172', memo: '', fitId: 'A1' },
+      { date: '2026-07-05', amount: -84.12, payee: 'KROGER #451', memo: '', fitId: 'A2' },
+      { date: '2026-07-06', amount: -6.50, payee: 'JOES COFFEE SHOP', memo: 'latte', fitId: 'A3' },
+      { date: '2026-07-07', amount: 2725.00, payee: 'ACME CORP PAYROLL', memo: 'DIRECT DEPOSIT', fitId: 'A4' },
+      { date: '2026-07-08', amount: -52.30, payee: 'SHELL OIL 5744', memo: '', fitId: 'A5' }
+    ]), 300);
+    true`);
+  await sleep(1100);
+  await shot('08-import-preview-dark.png');
+  await win.webContents.executeJavaScript(`document.querySelector('.modal-overlay')?.remove(); true`);
+
   await win.webContents.executeJavaScript(`App.go('retirement'); true`);
   await sleep(1400);
   await shot('02-retirement-dark.png');
