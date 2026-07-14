@@ -34,6 +34,22 @@ npm run dist       # build the Windows installer (dist/NestEgg Setup x.y.z.exe)
 node scripts/dev-server.js   # browser preview at http://localhost:8642 (localStorage-backed)
 ```
 
+## Releasing
+
+Releases are automated by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+To ship a new version:
+
+```bash
+# 1. bump "version" in package.json (e.g. 1.0.1), commit and push
+# 2. tag it and push the tag:
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+GitHub Actions builds the installer on a Windows runner and attaches
+`NestEgg Setup <version>.exe` to a new release for that tag. (Run the workflow
+manually from the Actions tab to get a test build as an artifact without releasing.)
+
 ## Architecture
 
 - **Electron** (sandboxed renderer, context isolation, CSP) — `main.js`, `preload.js`, `store.js`
