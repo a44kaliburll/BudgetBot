@@ -1,0 +1,50 @@
+{
+  "name": "nestegg",
+  "version": "1.0.0",
+  "description": "NestEgg — Comprehensive budget and retirement planner. Local, private, powerful.",
+  "main": "main.js",
+  "author": "Josh Parkinson",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "icon": "node scripts/make-icon.js",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "chart.js": "^4.4.7"
+  },
+  "build": {
+    "appId": "com.joshparkinson.nestegg",
+    "productName": "NestEgg",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "store.js",
+      "renderer/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "NestEgg",
+      "uninstallDisplayName": "NestEgg — Budget & Retirement Planner"
+    }
+  }
+}
