@@ -35,9 +35,9 @@
       const hsa       = acct('Health Savings (HSA)', 'hsa', 8150.00);
       const home      = acct('Home', 'property', 385000.00);
       const cc        = acct('Rewards Credit Card', 'creditCard', 1840.22, { apr: 22.99, minPayment: 55 });
-      const auto      = acct('Auto Loan', 'autoLoan', 14350.00, { apr: 6.4, minPayment: 385 });
+      const auto      = acct('Auto Loan', 'autoLoan', 14350.00, { apr: 6.4, minPayment: 385, originalPrincipal: 23500, termMonths: 60, firstPaymentDate: '2023-09-06' });
       const student   = acct('Student Loan', 'studentLoan', 21800.00, { apr: 5.2, minPayment: 250 });
-      const mortgage  = acct('Mortgage', 'mortgage', 294500.00, { apr: 6.125, minPayment: 1848 });
+      const mortgage  = acct('Mortgage', 'mortgage', 294500.00, { apr: 6.125, minPayment: 1848, originalPrincipal: 312000, termMonths: 360, firstPaymentDate: '2024-04-01' });
       s.accounts = [checking, savings, brokerage, k401, roth, hsa, home, cc, auto, student, mortgage];
 
       // ---- 12 months of transactions ----

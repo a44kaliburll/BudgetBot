@@ -269,6 +269,162 @@
       return /OFXHEADER|<OFX>|<\?OFX/i.test(text.slice(0, 2000));
     },
 
+    // ================= PDF STATEMENT IMPORT =================
+    isPDF(bytes) {
+      return bytes.length > 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46; // %PDF
+    },
+
+    // Extract text lines from a PDF using pdf.js: group text items by y, sort by x.
+    async pdfToLines(bytes) {
+      const pdfjs = window.pdfjsLib;
+      pdfjs.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
+      const doc = await pdfjs.getDocument({ data: bytes, isEvalSupported: false }).promise;
+      const lines = [];
+      for (let p = 1; p <= doc.numPages; p++) {
+        const page = await doc.getPage(p);
+        const content = await page.getTextContent();
+        const rows = new Map(); // rounded y -> [{x, str}]
+        for (const item of content.items) {
+          if (!item.str || !item.str.trim()) continue;
+          const y = Math.round(item.transform[5] / 2) * 2; // 2px tolerance
+          if (!rows.has(y)) rows.set(y, []);
+          rows.get(y).push({ x: item.transform[4], str: item.str });
+        }
+        const ys = [...rows.keys()].sort((a, b) => b - a); // top of page first
+        for (const y of ys) {
+          const line = rows.get(y).sort((a, b) => a.x - b.x).map(i => i.str).join(' ')
+            .replace(/\s+/g, ' ').trim();
+          if (line) lines.push(line);
+        }
+        lines.push(''); // page break
+      }
+      doc.destroy();
+      return lines;
+    },
+
+    // Bold overprint doubles every letter ("AACCCCOOUUNNTT") — collapse runs to compare
+    _collapseDoubles(s) {
+      return s.replace(/(.)\1+/g, '$1').toUpperCase();
+    },
+
+    // Parse credit-card statement lines (Chase-style: "MM/DD DESCRIPTION AMOUNT").
+    // Returns { transactions, review, meta }. Transaction amounts use NestEgg's
+    // convention: negative = money out. Card purchases are therefore flipped.
+    parseStatementText(lines) {
+      const TX_RE = /^(\d{2})\/(\d{2})\s+(.+?)\s+(-?)\$?((?:\d{1,3}(?:,\d{3})*)?\.\d{2})$/;
+      const meta = { newBalance: null, minPayment: null, apr: null, closeMonth: null, closeYear: null };
+      const transactions = [];
+      const review = [];
+
+      // ---- metadata pass ----
+      for (const raw of lines) {
+        const line = raw.replace(/\s+/g, ' ').trim();
+        let m;
+        if (meta.newBalance == null && (m = line.match(/New Balance:?\s*\$?([\d,]+\.\d{2})/i))) {
+          meta.newBalance = U.parseAmount(m[1]);
+        }
+        if (meta.minPayment == null && (m = line.match(/Minimum Payment Due:?\s*\$?([\d,]+\.\d{2})/i))) {
+          meta.minPayment = U.parseAmount(m[1]);
+        }
+        if (meta.closeYear == null && (m = line.match(/Opening\/Closing Date\s+\d{2}\/\d{2}\/(\d{2,4})\s*-\s*(\d{2})\/\d{2}\/(\d{2,4})/i))) {
+          meta.closeMonth = Number(m[2]);
+          meta.closeYear = Number(m[3].length === 2 ? '20' + m[3] : m[3]);
+        }
+        if (meta.closeYear == null && (m = line.match(/Statement Date:?\s*(\d{2})\/\d{2}\/(\d{2,4})/i))) {
+          meta.closeMonth = Number(m[1]);
+          meta.closeYear = Number(m[2].length === 2 ? '20' + m[2] : m[2]);
+        }
+        if (meta.apr == null && (m = this._collapseDoubles(line).match(/PURCHASES? ([\d.]+)%/))) {
+          meta.apr = parseFloat(m[1]);
+        }
+      }
+      if (meta.closeYear == null) {
+        meta.closeYear = Number(U.todayStr().slice(0, 4));
+        meta.closeMonth = Number(U.todayStr().slice(5, 7));
+      }
+
+      const yearFor = (month) => month > meta.closeMonth ? meta.closeYear - 1 : meta.closeYear;
+
+      // ---- transaction pass, section-aware ----
+      let inActivity = false;
+      let sawActivity = false;
+      let creditSection = false;
+
+      for (const raw of lines) {
+        const line = raw.replace(/\s+/g, ' ').trim();
+        if (!line) continue;
+        const collapsed = this._collapseDoubles(line);
+
+        // "AACCCCOOUUNNTT AACCTTIIVVIITTYY" collapses to "ACOUNT ACTIVITY"
+        if (/ACOUNT ACTIVITY/.test(collapsed)) { inActivity = true; sawActivity = true; continue; }
+        if (/PAYMENTS AND OTHER CREDITS/.test(collapsed)) { creditSection = true; continue; }
+        if (/^PURCHASES?\b/.test(collapsed)) { creditSection = false; continue; }
+        if (/TOTALS YEAR-TO-DATE|INTEREST CHARGE/.test(collapsed)) { inActivity = false; continue; }
+
+        const m = line.match(TX_RE);
+        if (!m) {
+          // brute-force bucket: starts like a transaction but didn't parse cleanly
+          if (inActivity && /^\d{2}\/\d{2}\s+\S/.test(line) && !/Page \d+ of \d+/i.test(line)) {
+            review.push({ raw: line });
+          }
+          continue;
+        }
+        if (!inActivity && sawActivity) continue;   // trailing pages after activity ended
+        if (!sawActivity && !inActivity) {
+          // no ACCOUNT ACTIVITY marker seen yet — generic statements still parse,
+          // but skip obvious non-activity contexts (payment coupons etc.)
+          if (/due date|balance|minimum/i.test(line)) continue;
+        }
+
+        const month = Number(m[1]), day = Number(m[2]);
+        if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+        const desc = m[3].trim();
+        let amount = U.parseAmount((m[4] || '') + m[5]);
+        // card convention: positive = charge (money out), negative = credit
+        amount = -amount;
+        const isCardPayment = amount > 0 && /payment|autopay|thank you/i.test(desc);
+        transactions.push({
+          date: `${yearFor(month)}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
+          amount,
+          payee: desc,
+          memo: '',
+          fitId: null,
+          flag: isCardPayment ? 'card-payment' : (creditSection && amount > 0 ? 'credit' : null)
+        });
+      }
+
+      return { transactions, review, meta };
+    },
+
+    // ================= LOAN MATH =================
+    // Progress and schedule for an installment loan from its contract terms.
+    loanStats(acc) {
+      if (!acc.termMonths || !acc.firstPaymentDate) return null;
+      const today = U.todayStr();
+      const first = acc.firstPaymentDate;
+      let made = 0;
+      if (today >= first) {
+        const [fy, fm, fd] = first.split('-').map(Number);
+        const [ty, tm, td] = today.split('-').map(Number);
+        made = (ty - fy) * 12 + (tm - fm) + (td >= fd ? 1 : 0);
+      }
+      made = U.clamp(made, 0, acc.termMonths);
+      return {
+        paymentsMade: made,
+        paymentsLeft: acc.termMonths - made,
+        scheduledPayoff: U.addMonthsToDate(first, acc.termMonths - 1),
+        pctDone: made / acc.termMonths
+      };
+    },
+
+    // Remaining balance implied by the amortization schedule after n payments.
+    loanBalanceEstimate(principal, apr, monthlyPayment, paymentsMade) {
+      const r = apr / 100 / 12;
+      if (r === 0) return Math.max(0, principal - monthlyPayment * paymentsMade);
+      const g = Math.pow(1 + r, paymentsMade);
+      return Math.max(0, principal * g - monthlyPayment * (g - 1) / r);
+    },
+
     // ================= AUTO-CATEGORIZATION =================
     // Learn payee -> category from history: Map(normPayee -> Map(categoryId -> count))
     buildPayeeMap(transactions) {
@@ -294,8 +450,16 @@
       'expressvpn', 'ring', 'adt', 'sirius', 'pandora', 'tidal', 'kindle', 'chewy',
       'dollar shave', 'hellofresh', 'blue apron', 'insurance', 'geico', 'state farm',
       'progressive', 'allstate', 'verizon', 't mobile', 'at&t', 'comcast', 'xfinity',
-      'spectrum', 'internet', 'storage', 'membership'
+      'spectrum', 'internet', 'storage', 'membership', 'discord', 'nitro', 'google one',
+      'google fi', 'twitch', 'realms'
     ],
+
+    // Word-boundary match so "ring" doesn't fire on "springs"
+    isKnownSubMerchant(key) {
+      return this.KNOWN_SUBS.some(k =>
+        new RegExp('(^|\\s)' + k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|\\s)').test(key) ||
+        (k.length >= 6 && key.includes(k)));
+    },
 
     SUB_CADENCES: [
       { id: 'weekly',     days: 7,     tol: 2,  freq: 'weekly',     perYear: 52 },
@@ -329,7 +493,7 @@
           intervals.push(U.daysBetween(charges[i - 1].date, charges[i].date));
         }
 
-        const known = this.KNOWN_SUBS.some(k => key.includes(k));
+        const known = this.isKnownSubMerchant(key);
 
         // best-matching cadence by share of intervals within tolerance
         let best = null;

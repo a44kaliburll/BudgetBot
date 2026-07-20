@@ -79,6 +79,22 @@ app.whenReady().then(() => {
     }
   });
 
+  // binary-safe import (PDF statements etc.) — returns base64
+  ipcMain.handle('file:importAny', async (_e, { filterName, filterExt }) => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Import',
+      properties: ['openFile'],
+      filters: [{ name: filterName, extensions: filterExt }]
+    });
+    if (canceled || !filePaths.length) return { ok: false, canceled: true };
+    try {
+      const buf = fs.readFileSync(filePaths[0]);
+      return { ok: true, filePath: filePaths[0], base64: buf.toString('base64') };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   ipcMain.handle('file:showDataFolder', () => {
     shell.showItemInFolder(store.filePath);
     return true;

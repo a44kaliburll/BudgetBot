@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld('api', {
   appInfo: () => ipcRenderer.invoke('app:info'),
   exportFile: (opts) => ipcRenderer.invoke('file:export', opts),
   importFile: (opts) => ipcRenderer.invoke('file:import', opts),
+  importAny: (opts) => ipcRenderer.invoke('file:importAny', opts),
   showDataFolder: () => ipcRenderer.invoke('file:showDataFolder')
 });

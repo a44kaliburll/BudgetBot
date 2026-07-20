@@ -100,20 +100,24 @@
   }
 
   // ---------------- import (OFX / QFX / CSV) ----------------
-  async function pickImportFile() {
+  async function pickImportFileBytes() {
     if (window.api) {
-      const res = await window.api.importFile({ filterName: 'Bank files (OFX, QFX, CSV)', filterExt: ['ofx', 'qfx', 'csv', 'txt'] });
-      return res.ok ? res.content : null;
+      const res = await window.api.importAny({ filterName: 'Bank files (OFX, QFX, CSV, PDF)', filterExt: ['ofx', 'qfx', 'csv', 'txt', 'pdf'] });
+      if (!res.ok) return null;
+      const bin = atob(res.base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
     }
     return new Promise((resolve) => {
       const inp = document.createElement('input');
-      inp.type = 'file'; inp.accept = '.ofx,.qfx,.csv,.txt';
+      inp.type = 'file'; inp.accept = '.ofx,.qfx,.csv,.txt,.pdf';
       inp.onchange = () => {
         const f = inp.files[0];
         if (!f) return resolve(null);
         const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.readAsText(f);
+        r.onload = () => resolve(new Uint8Array(r.result));
+        r.readAsArrayBuffer(f);
       };
       inp.click();
     });
@@ -121,8 +125,28 @@
 
   async function startImport() {
     if (!Store.activeAccounts().length) { C.toast('Add an account first', 'error'); return; }
-    const content = await pickImportFile();
-    if (!content) return;
+    const bytes = await pickImportFileBytes();
+    if (!bytes) return;
+
+    if (Engines.isPDF(bytes)) {
+      C.toast('Reading PDF statement…');
+      let parsed;
+      try {
+        const lines = await Engines.pdfToLines(bytes);
+        parsed = Engines.parseStatementText(lines);
+      } catch (err) {
+        C.toast('Couldn’t read that PDF: ' + err.message, 'error');
+        return;
+      }
+      if (!parsed.transactions.length && !parsed.review.length) {
+        C.toast('No transactions found — is this a scanned (image-only) statement?', 'error');
+        return;
+      }
+      openImportPreview(parsed.transactions, { review: parsed.review, meta: parsed.meta });
+      return;
+    }
+
+    const content = new TextDecoder('utf-8').decode(bytes);
     if (Engines.isOFX(content)) {
       const rows = Engines.parseOFX(content);
       if (!rows.length) { C.toast('No transactions found in that file', 'error'); return; }
@@ -185,8 +209,10 @@
 
   // Review screen: account, duplicate flags, auto-suggested categories.
   // Changing a suggestion teaches NestEgg a rule for next time.
-  function openImportPreview(rows) {
+  function openImportPreview(rows, extras = {}) {
     const accounts = Store.activeAccounts();
+    const meta = extras.meta || null;
+    const reviewLines = extras.review || [];
     const LIMIT = 1000;
     const items = rows.slice(0, LIMIT).map((r, i) => ({ ...r, idx: i }));
     const payeeMap = Engines.buildPayeeMap(Store.state.transactions);
@@ -218,11 +244,13 @@
     };
 
     const rowsHtml = () => items.map(it => `
-      <tr data-idx="${it.idx}" style="${it.dup ? 'opacity:0.5' : ''}">
-        <td><input type="checkbox" data-role="use" ${it.dup ? '' : 'checked'}></td>
+      <tr data-idx="${it.idx}" style="${it.dup || it.flag === 'card-payment' ? 'opacity:0.5' : ''}">
+        <td><input type="checkbox" data-role="use" ${it.dup || it.flag === 'card-payment' ? '' : 'checked'}></td>
         <td class="nowrap muted">${U.dateLabelShort(it.date)}</td>
         <td title="${U.esc(it.memo)}">${U.esc(it.payee || '(no description)')}
           ${it.dup ? '<span class="pill">duplicate</span>' : ''}
+          ${it.flag === 'card-payment' ? '<span class="pill" title="This looks like a card payment — usually recorded as a transfer from checking, so it stays unchecked to avoid double counting.">card payment?</span>' : ''}
+          ${it.flag === 'credit' ? '<span class="pill status-good" title="Credit / refund — imported as money in.">credit</span>' : ''}
           ${!it.dup && it.suggestedId ? `<span class="pill" title="${it.suggestedFromRule ? 'matched one of your rules' : 'learned from your history'}">auto</span>` : ''}</td>
         <td class="num amount ${it.amount < 0 ? 'neg' : 'pos'}">${it.amount < 0 ? '−' : '+'}${U.money(Math.abs(it.amount))}</td>
         <td><select data-role="cat" style="padding:4px 8px">${catOptions(it)}</select></td>
@@ -238,10 +266,30 @@
           <span class="muted small">${rows.length > LIMIT ? `showing first ${LIMIT} of ${rows.length} · ` : ''}duplicates are unchecked automatically ·
           changing a category teaches NestEgg a rule</span>
         </div>
-        <div class="table-wrap" style="max-height:46vh;overflow-y:auto"><table class="data">
+        ${meta && meta.newBalance != null ? `<div class="callout mb-14">
+          Statement parsed — new balance <b>${U.money(meta.newBalance)}</b>${meta.minPayment != null ? `, minimum payment <b>${U.money(meta.minPayment)}</b>` : ''}${meta.apr != null ? `, purchase APR <b>${meta.apr}%</b>` : ''}.
+          <label class="checkbox-row mt-8"><input type="checkbox" id="prev-syncmeta" checked>
+          Update the selected account with these numbers after import</label>
+        </div>` : ''}
+        <div class="table-wrap" style="max-height:${reviewLines.length ? 34 : 46}vh;overflow-y:auto"><table class="data">
           <thead><tr><th style="width:30px"></th><th>Date</th><th>Payee</th><th class="num">Amount</th><th style="width:190px">Category</th></tr></thead>
           <tbody id="prev-rows">${rowsHtml()}</tbody>
-        </table></div>`,
+        </table></div>
+        ${reviewLines.length ? `<div class="mt-14">
+          <div class="card-title">${C.icon('alert')} Needs a human — ${reviewLines.length} line${reviewLines.length > 1 ? 's' : ''} I couldn’t read confidently</div>
+          <p class="muted small mb-8">Fix the details and tick the box to include them, or leave them unticked to skip.</p>
+          <div style="max-height:20vh;overflow-y:auto">
+          ${reviewLines.map((r, i) => `
+            <div class="flex mb-8" data-review="${i}" style="flex-wrap:wrap">
+              <input type="checkbox" data-role="rv-use">
+              <input type="date" data-role="rv-date" style="width:140px">
+              <input type="text" data-role="rv-payee" placeholder="payee" style="flex:1;min-width:120px">
+              <input type="number" step="0.01" data-role="rv-amount" placeholder="amount" style="width:100px">
+              <select data-role="rv-type" style="width:100px"><option value="expense">Expense</option><option value="income">Income</option></select>
+              <div class="muted small" style="flex-basis:100%;padding-left:24px" title="${U.esc(r.raw)}">raw: ${U.esc(r.raw.length > 90 ? r.raw.slice(0, 90) + '…' : r.raw)}</div>
+            </div>`).join('')}
+          </div>
+        </div>` : ''}`,
       footer: `<button class="btn ghost" data-act="cancel">Cancel</button>
                <button class="btn primary" data-act="import">Import selected</button>`
     });
@@ -255,6 +303,8 @@
     m.footer.querySelector('[data-act="import"]').addEventListener('click', () => {
       const accountId = m.body.querySelector('#prev-account').value;
       let imported = 0, learned = 0;
+      const importedPayees = [];
+
       for (const tr of m.body.querySelectorAll('#prev-rows tr')) {
         if (!tr.querySelector('[data-role="use"]').checked) continue;
         const it = items[Number(tr.dataset.idx)];
@@ -270,15 +320,117 @@
           fitId: it.fitId
         });
         imported++;
+        importedPayees.push({ payee: it.payee, amount: Math.abs(it.amount), date: it.date, expense: it.group === 'expense', accountId, categoryId: chosen });
         // user corrected (or set) the category → remember it as a rule
         if (chosen && chosen !== it.suggestedId && it.payee) {
           if (Store.upsertRule(it.payee, chosen)) learned++;
         }
       }
+
+      // human-corrected lines from the needs-review bucket
+      for (const row of m.body.querySelectorAll('[data-review]')) {
+        if (!row.querySelector('[data-role="rv-use"]').checked) continue;
+        const date = row.querySelector('[data-role="rv-date"]').value;
+        const amount = U.parseAmount(row.querySelector('[data-role="rv-amount"]').value);
+        const payee = row.querySelector('[data-role="rv-payee"]').value.trim();
+        if (!date || !(Math.abs(amount) > 0)) continue;
+        Store.addTransaction({
+          date,
+          type: row.querySelector('[data-role="rv-type"]').value,
+          amount: Math.abs(amount),
+          accountId,
+          payee,
+          notes: 'Imported (manual fix)'
+        });
+        imported++;
+        importedPayees.push({ payee, amount: Math.abs(amount), date, expense: true, accountId, categoryId: null });
+      }
+
+      // sync statement metadata onto the account (balance reconcile, APR, min payment)
+      if (meta && meta.newBalance != null && m.body.querySelector('#prev-syncmeta')?.checked) {
+        const acc = Store.account(accountId);
+        if (acc) {
+          const patch = { balance: meta.newBalance };
+          if (meta.apr != null && !acc.apr) patch.apr = meta.apr;
+          if (meta.minPayment != null && !acc.minPayment) patch.minPayment = meta.minPayment;
+          Store.updateAccount(accountId, patch);
+        }
+      }
+
       m.close();
       C.toast(`Imported ${imported} transactions${learned ? ` · learned ${learned} new rule${learned > 1 ? 's' : ''}` : ''}`);
       App.refresh();
+      if (imported >= 3) offerCascade(importedPayees);
     });
+  }
+
+  // After a meaningful import, offer to track newly detected recurring charges.
+  // Two tiers: confirmed patterns (2+ charges) and single charges from known
+  // subscription merchants (cadence guessed monthly).
+  function offerCascade(importedTxs) {
+    const keys = new Set(importedTxs.map(t => U.normPayee(t.payee)).filter(k => k.length >= 3));
+    const ignores = new Set(Store.state.subscriptionIgnores);
+    const detected = Engines.detectSubscriptions(Store.state.transactions);
+    const candidates = detected
+      .filter(s => keys.has(s.key) && !ignores.has(s.key) && !s.inactive && !Views.subscriptions.isTracked(s));
+
+    const detectedKeys = new Set(detected.map(s => s.key));
+    const seen = new Set(candidates.map(s => s.key));
+    for (const tx of importedTxs) {
+      if (!tx.expense || !tx.payee) continue;
+      const key = U.normPayee(tx.payee);
+      if (key.length < 3 || seen.has(key) || detectedKeys.has(key) || ignores.has(key)) continue;
+      if (!Engines.isKnownSubMerchant(key)) continue;
+      const pseudo = {
+        key,
+        displayName: tx.payee,
+        categoryId: tx.categoryId,
+        accountId: tx.accountId,
+        cadence: 'monthly',
+        frequency: 'monthly',
+        perYear: 12,
+        amount: tx.amount,
+        monthlyCost: tx.amount,
+        chargeCount: 1,
+        lastDate: tx.date,
+        nextExpected: U.addMonthsToDate(tx.date, 1),
+        inactive: false,
+        priceChange: null,
+        guessed: true
+      };
+      if (Views.subscriptions.isTracked(pseudo)) continue;
+      seen.add(key);
+      candidates.push(pseudo);
+    }
+
+    candidates.sort((a, b) => b.amount - a.amount);
+    candidates.length = Math.min(candidates.length, 8);
+    if (!candidates.length) return;
+
+    const m = C.modal({
+      title: 'Recurring charges spotted in this import',
+      body: `
+        <p class="muted small mb-14">These look like subscriptions or regular bills. Track them to get
+        due-date reminders and cash-flow planning — they also appear automatically in the Subscriptions view.</p>
+        ${candidates.map((s, i) => `
+          <div class="flex-between mb-8" data-ci="${i}">
+            <span><b>${U.esc(s.displayName)}</b>
+              <span class="muted small">· ${s.guessed ? 'looks like a subscription (cadence guessed monthly)' : Store.FREQUENCIES[s.frequency]?.label || s.cadence} · ${U.money(s.amount)}${s.priceChange ? ` · <span style="color:var(--critical)">price changed ${U.money(s.priceChange.from)} → ${U.money(s.priceChange.to)}</span>` : ''}</span></span>
+            <button class="btn sm" data-act="track">${C.icon('repeat')} Track</button>
+          </div>`).join('')}`,
+      footer: `<button class="btn ghost left" data-act="subs">Open Subscriptions</button>
+               <button class="btn primary" data-act="done">Done</button>`
+    });
+
+    m.body.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-act="track"]');
+      if (!btn) return;
+      const row = btn.closest('[data-ci]');
+      Views.subscriptions.trackAsRecurring(candidates[Number(row.dataset.ci)]);
+      btn.replaceWith(Object.assign(document.createElement('span'), { className: 'pill status-good', textContent: 'tracked' }));
+    });
+    m.footer.querySelector('[data-act="subs"]').addEventListener('click', () => { m.close(); App.go('subscriptions'); });
+    m.footer.querySelector('[data-act="done"]').addEventListener('click', m.close);
   }
 
   // ---------------- rules manager ----------------

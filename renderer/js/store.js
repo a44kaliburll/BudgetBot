@@ -140,6 +140,10 @@
       s.retirement = Object.assign(defaultRetirement(), data.retirement || {});
       s.settings = Object.assign({ theme: 'dark' }, data.settings || {});
       s.meta = Object.assign({ createdAt: U.todayStr(), onboarded: true }, data.meta || {});
+      // v1.2: ensure a Debt Payments category exists for loan interest/fees
+      if (!s.categories.some(c => c.group === 'expense' && /^debt payments$/i.test(c.name))) {
+        s.categories.push({ id: U.uid(), name: 'Debt Payments', group: 'expense', colorSlot: 6 });
+      }
       s.version = 1;
       return s;
     },

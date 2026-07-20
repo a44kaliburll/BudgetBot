@@ -32,6 +32,9 @@
   }
 
   window.Views.subscriptions = {
+    isTracked,
+    trackAsRecurring,
+
     render(el) {
       const ignores = new Set(Store.state.subscriptionIgnores);
       const all = Engines.detectSubscriptions(Store.state.transactions);

@@ -10,7 +10,10 @@
     render(el) {
       const debts = Store.activeAccounts()
         .filter(a => Store.accountType(a).kind === 'liability' && a.balance > 0)
-        .map(a => ({ id: a.id, name: a.name, balance: a.balance, apr: a.apr || 0, minPayment: a.minPayment || 0 }));
+        .map(a => ({
+          id: a.id, name: a.name, balance: a.balance, apr: a.apr || 0, minPayment: a.minPayment || 0,
+          loanStats: Engines.loanStats(a), termMonths: a.termMonths
+        }));
 
       el.innerHTML = `
         <div class="view-header">
@@ -88,15 +91,23 @@
             <div class="card-title">Payoff order — ${strategy}</div>
             <div class="table-wrap"><table class="data">
               <thead><tr><th>#</th><th>Debt</th><th class="num">APR</th><th class="num">Balance</th><th class="num">Paid off</th><th class="num">Interest paid</th></tr></thead>
-              <tbody>${U.sortBy(chosen.perDebt, d => d.payoffMonth == null ? 9999 : d.payoffMonth).map((d, i) => `
-                <tr>
+              <tbody>${U.sortBy(chosen.perDebt, d => d.payoffMonth == null ? 9999 : d.payoffMonth).map((d, i) => {
+                const src = debts.find(x => x.id === d.id);
+                let loanNote = '';
+                if (src && src.loanStats && d.payoffMonth != null) {
+                  const st = src.loanStats;
+                  const early = st.paymentsLeft - d.payoffMonth;
+                  loanNote = `<br><span class="muted small">payment ${st.paymentsMade} of ${src.termMonths}${early > 1 ? ` · <span style="color:var(--delta-good)">${early} mo ahead of schedule</span>` : early < -1 ? ` · ${-early} mo behind schedule` : ' · on schedule'}</span>`;
+                }
+                return `<tr>
                   <td class="muted">${i + 1}</td>
-                  <td><b>${U.esc(d.name)}</b></td>
+                  <td><b>${U.esc(d.name)}</b>${loanNote}</td>
                   <td class="num">${d.apr.toFixed(2)}%</td>
                   <td class="num">${U.money0(d.startBalance)}</td>
                   <td class="num">${d.payoffMonth == null ? '—' : debtFreeDate(d.payoffMonth)}</td>
                   <td class="num">${U.money0(d.interestPaid)}</td>
-                </tr>`).join('')}</tbody>
+                </tr>`;
+              }).join('')}</tbody>
             </table></div>
             <p class="muted small mt-8">Freed-up minimum payments roll into the next debt automatically.</p>
           </div>

@@ -3,8 +3,9 @@
   'use strict';
   window.Views = window.Views || {};
 
-  function openRecurringModal(rec) {
-    const isEdit = !!rec;
+  // forceNew: treat `rec` as a prefill template rather than an existing item
+  function openRecurringModal(rec, forceNew = false) {
+    const isEdit = !!rec && !forceNew;
     const accounts = Store.activeAccounts();
     if (!accounts.length) { C.toast('Add an account first', 'error'); return; }
     const r = rec || {
@@ -77,6 +78,8 @@
   }
 
   window.Views.recurring = {
+    openRecurringModal,
+
     render(el) {
       const recs = Store.state.recurring;
       const today = U.todayStr();
