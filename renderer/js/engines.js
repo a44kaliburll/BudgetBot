@@ -396,6 +396,96 @@
       return { transactions, review, meta };
     },
 
+    // ================= PAYSTUB PARSING =================
+    isPaystub(lines) {
+      const t = lines.join('\n');
+      return /Earnings Statement/i.test(t) ||
+        (/Gross Pay/i.test(t) && /Net Pay/i.test(t) && /Pay Date/i.test(t));
+    },
+
+    // Money tokens from a paystub line. Handles standard "$1,234.56" and the
+    // ADP space-grouped format "2 947 07" (last group = cents), incl. -/* marks.
+    _stubAmounts(line) {
+      const std = line.match(/-?\$?\d[\d,]*\.\d{2}/g);
+      if (std) return std.map(s => U.parseAmount(s));
+      const out = [];
+      const re = /(-?)\$?(\d+(?: \d{3})* \d{2})(?=\*|\s|$)/g;
+      let m;
+      while ((m = re.exec(line))) {
+        const parts = m[2].split(' ');
+        const cents = parts.pop();
+        out.push(parseFloat(parts.join('') + '.' + cents) * (m[1] === '-' ? -1 : 1));
+      }
+      return out;
+    },
+
+    _stubDate(lines, label) {
+      for (const line of lines) {
+        const m = line.match(new RegExp(label + '\\s*:?\\s*(\\d{1,2})\\/(\\d{1,2})\\/(\\d{2,4})', 'i'));
+        if (m) {
+          const y = m[3].length === 2 ? '20' + m[3] : m[3];
+          return `${y}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+        }
+      }
+      return null;
+    },
+
+    parsePaystub(lines) {
+      const clean = lines.map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+      const out = {
+        employer: '', payDate: null, periodBegin: null, periodEnd: null,
+        gross: null, grossYTD: null, net: null, retirementDeduction: null,
+        frequency: 'biweekly', periodsPerYear: 26
+      };
+
+      out.payDate = this._stubDate(clean, 'Pay Date');
+      out.periodBegin = this._stubDate(clean, 'Period Beginning');
+      out.periodEnd = this._stubDate(clean, 'Period Ending');
+
+      for (const line of clean) {
+        if (!out.employer && /Period Beginning/i.test(line)) {
+          const prefix = line.split(/Period Beginning/i)[0].replace(/[^\w&.,' -]/g, ' ').replace(/\s+/g, ' ').trim();
+          if (prefix.length >= 3) out.employer = prefix;
+        }
+        if (out.gross == null && /Gross Pay/i.test(line)) {
+          const amts = this._stubAmounts(line).filter(a => a > 0);
+          if (amts.length) {
+            out.gross = amts[0];
+            if (amts.length > 1 && amts[amts.length - 1] > amts[0]) out.grossYTD = amts[amts.length - 1];
+          }
+        }
+        if (out.net == null && /Net Pay/i.test(line)) {
+          const amts = this._stubAmounts(line).filter(a => a > 0);
+          if (amts.length) out.net = amts[0];
+        }
+        if (out.retirementDeduction == null && /(401|403|retirement|pension|tsp|\bers\b)/i.test(line)) {
+          const amts = this._stubAmounts(line);
+          if (amts.length && amts[0] < 0) out.retirementDeduction = Math.abs(amts[0]);
+        }
+      }
+
+      // pay frequency from the period length
+      if (out.periodBegin && out.periodEnd) {
+        const days = U.daysBetween(out.periodBegin, out.periodEnd);
+        if (days <= 7) { out.frequency = 'weekly'; out.periodsPerYear = 52; }
+        else if (days <= 13) { out.frequency = 'biweekly'; out.periodsPerYear = 26; }
+        else if (days <= 16) { out.frequency = 'semimonthly'; out.periodsPerYear = 24; }
+        else { out.frequency = 'monthly'; out.periodsPerYear = 12; }
+      }
+
+      out.annualGross = out.gross != null ? out.gross * out.periodsPerYear : null;
+      // on-pace estimate from YTD (includes bonuses/extras)
+      if (out.grossYTD && out.payDate) {
+        const d = U.strToDate(out.payDate);
+        const dayOfYear = Math.max(1, Math.round((d - new Date(d.getFullYear(), 0, 1)) / 86400000) + 1);
+        out.annualFromYTD = out.grossYTD / dayOfYear * 365;
+      }
+      if (out.gross != null && out.retirementDeduction != null) {
+        out.contributionPct = out.retirementDeduction / out.gross * 100;
+      }
+      return out;
+    },
+
     // ================= LOAN MATH =================
     // Progress and schedule for an installment loan from its contract terms.
     loanStats(acc) {

@@ -129,10 +129,19 @@
     if (!bytes) return;
 
     if (Engines.isPDF(bytes)) {
-      C.toast('Reading PDF statement…');
+      C.toast('Reading PDF…');
       let parsed;
       try {
         const lines = await Engines.pdfToLines(bytes);
+        if (Engines.isPaystub(lines)) {
+          const stub = Engines.parsePaystub(lines);
+          if (stub.gross == null && stub.net == null) {
+            C.toast('This looks like a paystub, but I couldn’t read the amounts', 'error');
+            return;
+          }
+          openPaystubReview(stub);
+          return;
+        }
         parsed = Engines.parseStatementText(lines);
       } catch (err) {
         C.toast('Couldn’t read that PDF: ' + err.message, 'error');
@@ -433,6 +442,126 @@
     m.footer.querySelector('[data-act="done"]').addEventListener('click', m.close);
   }
 
+  // ---------------- paystub review ----------------
+  // Parsed paystub -> annual income + one-click setup of the paycheck flow.
+  function openPaystubReview(stub) {
+    const accounts = Store.activeAccounts().filter(a => Store.accountType(a).kind === 'asset');
+    if (!accounts.length) { C.toast('Add a checking account first', 'error'); return; }
+    const checking = accounts.find(a => a.type === 'checking') || accounts[0];
+    const r = Store.state.retirement;
+    const salaryCat = Store.incomeCategories().find(c => /salary/i.test(c.name));
+
+    const payDate = stub.payDate || U.todayStr();
+    const empKey = U.normPayee(stub.employer || 'paycheck');
+    const existingRec = Store.state.recurring.find(x =>
+      x.type === 'income' && U.normPayee(x.name) === empKey);
+    const dupTx = Store.state.transactions.some(t =>
+      t.type === 'income' && t.date === payDate && Math.abs(t.amount - (stub.net || 0)) < 0.01);
+
+    const freqOptions = [
+      { value: '52', label: 'Weekly (52/yr)' }, { value: '26', label: 'Every 2 weeks (26/yr)' },
+      { value: '24', label: 'Twice a month (24/yr)' }, { value: '12', label: 'Monthly (12/yr)' }
+    ];
+
+    const m = C.modal({
+      title: 'Paystub detected',
+      wide: true,
+      body: `
+        <div class="flex-between mb-14" style="align-items:flex-start">
+          <div>
+            <div class="stat-label">Estimated annual gross income</div>
+            <div class="hero-number" id="stub-annual"></div>
+            <div class="muted small" id="stub-annual-sub"></div>
+          </div>
+          <div class="right muted small">
+            ${stub.employer ? `<b style="color:var(--ink)">${U.esc(stub.employer)}</b><br>` : ''}
+            pay date ${U.dateLabel(payDate)}${stub.periodBegin && stub.periodEnd ? `<br>period ${U.dateLabelShort(stub.periodBegin)} – ${U.dateLabelShort(stub.periodEnd)}` : ''}
+            ${stub.grossYTD ? `<br>YTD gross ${U.money(stub.grossYTD)}` : ''}
+          </div>
+        </div>
+        <div class="form-grid mb-14">
+          ${C.input({ id: 'stub-gross', label: 'Gross pay per period', type: 'number', step: '0.01', value: stub.gross != null ? stub.gross.toFixed(2) : '' })}
+          ${C.select({ id: 'stub-freq', label: 'Pay frequency', options: freqOptions, value: String(stub.periodsPerYear) })}
+          ${C.input({ id: 'stub-net', label: 'Net pay (take-home)', type: 'number', step: '0.01', value: stub.net != null ? stub.net.toFixed(2) : '' })}
+          ${C.select({ id: 'stub-account', label: 'Deposited into', options: accounts.map(a => ({ value: a.id, label: a.name })), value: checking.id })}
+        </div>
+        <div class="divider"></div>
+        ${C.checkbox({ id: 'stub-do-tx', label: `Record this paycheck as income on ${U.dateLabel(payDate)}${dupTx ? ' — looks already recorded, so this is off' : ''}`, checked: !dupTx })}
+        <div class="mt-8">${C.checkbox({ id: 'stub-do-rec', label: existingRec ? `Update recurring paycheck “${U.esc(existingRec.name)}” (amount & next date)` : 'Set up a recurring paycheck so future deposits are expected automatically', checked: true })}</div>
+        <div class="mt-8"><label class="checkbox-row"><input type="checkbox" id="stub-do-salary" checked> <span id="stub-salary-label"></span></label></div>
+        ${stub.contributionPct != null ? `<div class="mt-8">${C.checkbox({ id: 'stub-do-contrib', label: `Set retirement contribution to ${stub.contributionPct.toFixed(1)}% of salary (from the ${U.money(stub.retirementDeduction)} retirement deduction)`, checked: true })}</div>` : ''}
+      `,
+      footer: `<button class="btn ghost" data-act="cancel">Cancel</button>
+               <button class="btn primary" data-act="apply">Apply</button>`
+    });
+
+    const $ = (id) => m.body.querySelector(id);
+    const recompute = () => {
+      const gross = U.parseAmount($('#stub-gross').value);
+      const per = Number($('#stub-freq').value);
+      const annual = gross * per;
+      $('#stub-annual').textContent = annual > 0 ? U.money0(annual) : '—';
+      $('#stub-annual-sub').textContent = [
+        annual > 0 ? `${U.money(gross)} gross × ${per} pay periods` : '',
+        stub.annualFromYTD ? `on pace for ${U.money0(stub.annualFromYTD)} this year incl. extras` : ''
+      ].filter(Boolean).join(' · ');
+      m.body.querySelector('#stub-salary-label').textContent =
+        `Use ${U.money0(annual)} as your salary in the Retirement planner${r.salary ? ` (currently ${U.money0(r.salary)})` : ''}`;
+    };
+    $('#stub-gross').addEventListener('input', recompute);
+    $('#stub-freq').addEventListener('change', recompute);
+    recompute();
+
+    m.footer.querySelector('[data-act="cancel"]').addEventListener('click', m.close);
+    m.footer.querySelector('[data-act="apply"]').addEventListener('click', () => {
+      const gross = U.parseAmount($('#stub-gross').value);
+      const net = U.parseAmount($('#stub-net').value);
+      const per = Number($('#stub-freq').value);
+      const accountId = $('#stub-account').value;
+      const name = stub.employer || 'Paycheck';
+      const freq = per === 52 ? 'weekly' : per === 12 ? 'monthly' : 'biweekly';
+      const done = [];
+
+      if ($('#stub-do-tx').checked && net > 0) {
+        Store.addTransaction({
+          date: payDate, type: 'income', amount: net, accountId,
+          categoryId: salaryCat ? salaryCat.id : null, payee: name, notes: 'From paystub'
+        });
+        done.push('paycheck recorded');
+      }
+
+      if ($('#stub-do-rec').checked && net > 0) {
+        let nextDate = payDate, guard = 0;
+        while (nextDate <= U.todayStr() && guard++ < 60) nextDate = Store.advanceDate(nextDate, freq);
+        if (existingRec) {
+          Store.updateRecurring(existingRec.id, { amount: net, frequency: freq, nextDate, accountId });
+          done.push('recurring paycheck updated');
+        } else {
+          Store.addRecurring({
+            name, type: 'income', amount: net, accountId,
+            categoryId: salaryCat ? salaryCat.id : null, frequency: freq, nextDate, autoPost: false
+          });
+          done.push('recurring paycheck created');
+        }
+      }
+
+      if ($('#stub-do-salary').checked && gross > 0) {
+        r.salary = Math.round(gross * per);
+        done.push(`retirement salary set to ${U.money0(r.salary)}`);
+      }
+
+      if ($('#stub-do-contrib')?.checked && stub.contributionPct != null) {
+        r.employeePct = Math.round(stub.contributionPct * 10) / 10;
+        done.push(`contribution ${r.employeePct}%`);
+      }
+
+      Store.persist();
+      m.close();
+      C.toast(done.length ? done.join(' · ') : 'Nothing selected');
+      App.refresh();
+    });
+  }
+
   // ---------------- rules manager ----------------
   function openRulesManager() {
     const allCats = () => [...Store.expenseCategories(), ...Store.incomeCategories()];
@@ -524,6 +653,7 @@
   window.Views.transactions = {
     openTxModal,
     openImportPreview,
+    openPaystubReview,
 
     filtered() {
       let list = Store.state.transactions;
